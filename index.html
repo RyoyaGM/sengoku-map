@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>戦国時代 郡地図（完全自立版）</title>
+    <title>戦国時代 郡地図（起伏優先版）</title>
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <style>
-        body { margin: 0; padding: 0; background-color: #4682b4; } /* 最下層：海の青色 */
+        body { margin: 0; padding: 0; background-color: #4682b4; }
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
     </style>
 </head>
@@ -16,8 +16,7 @@
     <div id="map"></div>
 
     <script>
-        // ★大手術：エラーの元凶だった「外部プラグイン」の代わりとなる翻訳機をここに自作して内蔵しました。
-        // これにより、ダウンロード済みの「dem_png」を直接読み込んで3Dの影に変換できます。
+        // 1. 国土地理院の標高タイルを「陰影（影）」として解釈する独自の設定
         maplibregl.addProtocol('gsidem', (params, callback) => {
             const url = params.url.replace('gsidem://', '');
             const image = new Image();
@@ -25,38 +24,31 @@
             image.onload = () => {
                 const canvas = document.createElement('canvas');
                 canvas.width = 256; canvas.height = 256;
-                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                const ctx = canvas.getContext('2d');
                 ctx.drawImage(image, 0, 0);
                 const imgData = ctx.getImageData(0, 0, 256, 256);
                 const data = imgData.data;
-                
                 for (let i = 0; i < data.length; i += 4) {
-                    const r = data[i], g = data[i+1], b = data[i+2];
-                    if (r === 128 && g === 0 && b === 0) {
-                        data[i+3] = 0; // 海の部分は透明にする
-                    } else {
-                        let u = r * 65536 + g * 256 + b;
-                        let h = (u < 8388608) ? u : u - 16777216;
-                        const v = Math.round((h * 0.01 + 10000) * 10);
-                        data[i] = (v >> 16) & 0xff;
-                        data[i+1] = (v >> 8) & 0xff;
-                        data[i+2] = v & 0xff;
-                        data[i+3] = 255;
-                    }
+                    let r = data[i], g = data[i+1], b = data[i+2];
+                    let u = r * 65536 + g * 256 + b;
+                    let h = (u < 8388608) ? u : u - 16777216;
+                    // 地図エンジンが解釈できる高度データに変換
+                    const v = Math.round((h * 0.01 + 10000) * 10);
+                    data[i] = (v >> 16) & 0xff;
+                    data[i+1] = (v >> 8) & 0xff;
+                    data[i+2] = v & 0xff;
+                    data[i+3] = 255;
                 }
                 ctx.putImageData(imgData, 0, 0);
                 canvas.toBlob(blob => blob.arrayBuffer().then(arr => callback(null, arr, null, null)));
             };
-            image.onerror = () => callback(new Error('タイル読込失敗'));
             image.src = url;
             return { cancel: () => { image.src = ''; } };
         });
 
-        // Github Pages 上の /tiles フォルダを参照する設定
         const baseUrl = window.location.href.replace(/index\.html$/, '').replace(/\/$/, '');
         const localTileUrl = 'gsidem://' + baseUrl + '/tiles/{z}/{x}/{y}.png';
 
-        // 地図の組み立て
         const map = new maplibregl.Map({
             container: 'map',
             style: {
@@ -65,8 +57,15 @@
                     'local-terrain': { type: 'raster-dem', tiles: [localTileUrl], tileSize: 256, maxzoom: 13 }
                 },
                 layers: [
-                    // 1層目(一番下)：画面全体を海の色で固定
-                    { id: 'background', type: 'background', paint: { 'background-color': '#4682b4' } }
+                    // 最下層：まず世界を海の色で塗る
+                    { id: 'sea-base', type: 'background', paint: { 'background-color': '#4682b4' } },
+                    // 下層：地形の影を描く（この時点では海の中もボコボコしています）
+                    {
+                        id: 'hillshade-layer',
+                        type: 'hillshade',
+                        source: 'local-terrain',
+                        paint: { 'hillshade-exaggeration': 2.0, 'hillshade-shadow-color': '#222' }
+                    }
                 ]
             },
             center: [134.3, 34.0],
@@ -74,50 +73,74 @@
         });
 
         map.on('load', () => {
-            // 2層目(中間)：ローカルの標高データを使って山の影を描画
-            map.addLayer({
-                id: 'hillshade-layer',
-                type: 'hillshade',
-                source: 'local-terrain',
-                paint: { 'hillshade-exaggeration': 1.5, 'hillshade-shadow-color': '#222' }
-            });
-
-            // 3層目(一番上)：GeoJSON（陸地データ）をそのまま緑色で上に乗せる
             fetch('./mapdata.json')
                 .then(res => res.json())
                 .then(data => {
-                    map.addSource('gun-data', { type: 'geojson', data: data });
+                    // 中層：ここがポイント！
+                    // 「陸地を緑に塗る」のではなく、「陸地以外の部分を青いマスクで隠す」処理をします
+                    renderMask(map, data);
                     
-                    // 陸地を塗る（GeoJSONの仕様上、湖には最初から穴が空いているため、自動的に一番下の青色が見える！）
+                    // 上層：境界線と名前
+                    map.addSource('gun-lines', { type: 'geojson', data: data });
                     map.addLayer({
-                        id: 'land-fill',
-                        type: 'fill',
-                        source: 'gun-data',
-                        paint: { 'fill-color': '#556b2f', 'fill-opacity': 0.8 }
+                        id: 'borders', type: 'line', source: 'gun-lines',
+                        paint: { 'line-color': '#fff', 'line-width': 0.8, 'line-opacity': 0.4 }
                     });
-                    
-                    // 境界線
                     map.addLayer({
-                        id: 'borders',
-                        type: 'line',
-                        source: 'gun-data',
-                        paint: { 'line-color': '#fff', 'line-width': 0.5, 'line-opacity': 0.5 }
-                    });
-                    
-                    // ラベル
-                    map.addLayer({
-                        id: 'labels',
-                        type: 'symbol',
-                        source: 'gun-data',
+                        id: 'labels', type: 'symbol', source: 'gun-lines',
                         layout: { 'text-field': ['get', 'GUN'], 'text-size': 11 },
-                        paint: { 'text-color': '#222', 'text-halo-color': '#fff', 'text-halo-width': 1 }
+                        paint: { 'text-color': '#333', 'text-halo-color': '#fff', 'text-halo-width': 1 }
                     });
 
-                    // ズーム合わせ
                     const bbox = turf.bbox(data);
-                    map.fitBounds(bbox, { padding: 40, duration: 1000 });
+                    map.fitBounds(bbox, { padding: 50, duration: 1000 });
                 });
         });
+
+        function renderMask(map, geojsonData) {
+            // 世界全体を覆う青いポリゴンを作成
+            const world = [[-180, 85], [180, 85], [180, -85], [-180, -85], [-180, 85]];
+            const maskCoords = [ world ];
+
+            // 陸地のポリゴンを「穴」として追加していく
+            geojsonData.features.forEach(f => {
+                const coords = f.geometry.coordinates;
+                if (f.geometry.type === 'Polygon') {
+                    maskCoords.push(coords[0]);
+                } else if (f.geometry.type === 'MultiPolygon') {
+                    coords.forEach(p => maskCoords.push(p[0]));
+                }
+            });
+
+            map.addSource('mask-source', {
+                type: 'geojson',
+                data: { "type": "Feature", "geometry": { "type": "Polygon", "coordinates": maskCoords } }
+            });
+
+            // 陸地以外を青で塗りつぶす。
+            // 陸地の部分は「穴」になっているので、下の hillshade（影）が見える。
+            map.addLayer({
+                id: 'sea-mask-layer',
+                type: 'fill',
+                source: 'mask-source',
+                paint: {
+                    'fill-color': '#4682b4', // 海の青
+                    'fill-opacity': 1.0
+                }
+            });
+
+            // 陸地の上にうっすら緑を被せて、「緑の山」にする
+            map.addSource('land-color', { type: 'geojson', data: geojsonData });
+            map.addLayer({
+                id: 'land-fill',
+                type: 'fill',
+                source: 'land-color',
+                paint: {
+                    'fill-color': '#6b8e23', // 陸地の緑
+                    'fill-opacity': 0.4      // 影が見えるように半透明
+                }
+            });
+        }
     </script>
 </body>
 </html>

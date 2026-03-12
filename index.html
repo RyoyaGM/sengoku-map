@@ -7,7 +7,7 @@
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <style>
-        body { margin: 0; padding: 0; background-color: #4682b4; } /* 根本の海の色 */
+        body { margin: 0; padding: 0; background-color: #4682b4; } /* 蒼（海の色） */
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
     </style>
 </head>
@@ -15,9 +15,9 @@
     <div id="map"></div>
 
     <script>
-        // ★標高データから「海の影」を消去する自作翻訳機
-        maplibregl.addProtocol('gsidem', (params, callback) => {
-            const url = params.url.replace('gsidem://', '');
+        // ★重要：外部プラグインに依存せず、自前で地形の影を作る「透明化翻訳機」
+        maplibregl.addProtocol('gsitrip', (params, callback) => {
+            const url = params.url.replace('gsitrip://', '');
             const image = new Image();
             image.crossOrigin = 'Anonymous';
             image.onload = () => {
@@ -26,11 +26,16 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(image, 0, 0);
                 const imgData = ctx.getImageData(0, 0, 256, 256);
-                const data = imgData.data;
-                for (let i = 0; i < data.length; i += 4) {
-                    // 海（128, 0, 0）を検知したら、その場所の標高を「完全に平ら（0m）」に書き換える
-                    if (data[i] === 128 && data[i+1] === 0 && data[i+2] === 0) {
-                        data[i] = 1; data[i+1] = 134; data[i+2] = 160; // 0m相当のTerrain-RGB値
+                const d = imgData.data;
+                for (let i = 0; i < d.length; i += 4) {
+                    // 海（128,0,0）の部分を「完全な透明」にする。これで海に影が出なくなる。
+                    if (d[i] === 128 && d[i+1] === 0 && d[i+2] === 0) { d[i+3] = 0; }
+                    else {
+                        // 地理院標高RGBをMapLibreが理解できるTerrain-RGB形式にリアルタイム変換
+                        let u = d[i] * 65536 + d[i+1] * 256 + d[i+2];
+                        let h = (u < 8388608) ? u : u - 16777216;
+                        let v = Math.round((h * 0.01 + 10000) * 10);
+                        d[i] = (v >> 16) & 0xff; d[i+1] = (v >> 8) & 0xff; d[i+2] = v & 0xff; d[i+3] = 255;
                     }
                 }
                 ctx.putImageData(imgData, 0, 0);
@@ -40,19 +45,19 @@
             return { cancel: () => { image.src = ''; } };
         });
 
-        const baseUrl = window.location.origin + window.location.pathname.replace(/[^\/]*$/, '');
-        const localTileUrl = 'gsidem://' + baseUrl + 'tiles/{z}/{x}/{y}.png';
+        const baseUrl = window.location.href.split('index.html')[0].replace(/\/$/, '');
+        const tilesUrl = 'gsitrip://' + baseUrl + '/tiles/{z}/{x}/{y}.png';
 
         const map = new maplibregl.Map({
             container: 'map',
             style: {
                 version: 8,
                 sources: {
-                    'local-terrain': { type: 'raster-dem', tiles: [localTileUrl], tileSize: 256, maxzoom: 13 }
+                    'terrain-src': { type: 'raster-dem', tiles: [tilesUrl], tileSize: 256, maxzoom: 13 }
                 },
                 layers: [
-                    // 1. 最下層：全体を青く塗る（海になる）
-                    { id: 'background', type: 'background', paint: { 'background-color': '#4682b4' } }
+                    // 1. 【最下層】海の色（蒼）
+                    { id: 'sea-bg', type: 'background', paint: { 'background-color': '#4682b4' } }
                 ]
             },
             center: [134.3, 34.0],
@@ -61,42 +66,37 @@
 
         map.on('load', () => {
             fetch('./mapdata.json').then(res => res.json()).then(data => {
-                map.addSource('land-source', { type: 'geojson', data: data });
+                map.addSource('land-src', { type: 'geojson', data: data });
 
-                // 2. 中層：陸地を「緑」で塗る
-                // GeoJSONの仕様で、湖の部分は勝手に「穴」になるので、下の青が見えます。
+                // 2. 【中層】陸地を緑で塗る
+                // GeoJSONの「湖」の部分は自動的に穴が空くので、下の蒼が見えます。
                 map.addLayer({
                     id: 'land-fill',
                     type: 'fill',
-                    source: 'land-source',
+                    source: 'land-src',
                     paint: { 'fill-color': '#556b2f', 'fill-opacity': 1.0 }
                 });
 
-                // 3. 最上層：山の「影」だけを重ねる
-                // 下の緑色に対して「影」として作用するため、緑の山脈が浮かび上がります。
+                // 3. 【上層】山の影だけを乗せる
+                // 自作翻訳機で「海を透明」にしたため、陸地だけに影が落ちます。
                 map.addLayer({
-                    id: 'hillshade-layer',
+                    id: 'hills',
                     type: 'hillshade',
-                    source: 'local-terrain',
-                    paint: {
-                        'hillshade-exaggeration': 2.0, // 険しさを強調
+                    source: 'terrain-src',
+                    paint: { 
+                        'hillshade-exaggeration': 1.8,
                         'hillshade-shadow-color': '#000000',
-                        'hillshade-highlight-color': '#ffffff',
-                        'hillshade-accent-color': '#000000'
+                        'hillshade-highlight-color': '#ffffff'
                     }
                 });
 
-                // 4. 装飾：境界線と郡名
+                // 4. 【装飾】境界線と名前
                 map.addLayer({
-                    id: 'borders',
-                    type: 'line',
-                    source: 'land-source',
+                    id: 'borders', type: 'line', source: 'land-src',
                     paint: { 'line-color': '#fff', 'line-width': 0.5, 'line-opacity': 0.4 }
                 });
                 map.addLayer({
-                    id: 'labels',
-                    type: 'symbol',
-                    source: 'land-source',
+                    id: 'labels', type: 'symbol', source: 'land-src',
                     layout: { 'text-field': ['get', 'GUN'], 'text-size': 12 },
                     paint: { 'text-color': '#fff', 'text-halo-color': '#222', 'text-halo-width': 1.5 }
                 });

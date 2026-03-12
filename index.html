@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>戦国時代 郡地図</title>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+    <script src="https://unpkg.com/maplibre-gl-gsi-terrain@1.0.0/dist/maplibre-gl-gsi-terrain.js"></script>
+    <style>
+        body { margin: 0; padding: 0; background-color: #4682b4; } /* 海の青色 */
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+        // 標高データの読み込みプロトコル
+        maplibregl.addProtocol('gsidem', maplibreglGsiTerrain.rasterDemProtocol);
+        
+        // URLを自動計算して同じ階層の tiles フォルダを参照する
+        const baseUrl = window.location.href.replace(/[^/]*$/, '');
+        const localTileUrl = 'gsidem://' + baseUrl + 'tiles/{z}/{x}/{y}.png';
+
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: {
+                version: 8,
+                sources: {
+                    // ダウンロード済みの地形データ
+                    'local-terrain': { type: 'raster-dem', tiles: [localTileUrl], tileSize: 256, maxzoom: 13 }
+                },
+                layers: [
+                    // ベースの陸地（緑色）
+                    { id: 'land-base-green', type: 'background', paint: { 'background-color': '#6b8e23' } },
+                    // 地形の陰影
+                    {
+                        id: 'hillshade-layer',
+                        type: 'hillshade',
+                        source: 'local-terrain',
+                        paint: { 'hillshade-exaggeration': 1.5, 'hillshade-shadow-color': '#000000', 'hillshade-highlight-color': '#ffffff' }
+                    }
+                ]
+            },
+            center: [134.3, 34.0], // 初期位置（阿波国）
+            zoom: 8
+        });
+
+        // ポリゴンの回転方向計算（島と湖のくり抜き用）
+        function isClockwise(ring) {
+            let sum = 0;
+            for (let i = 0; i < ring.length - 1; i++) {
+                sum += (ring[i+1][0] - ring[i][0]) * (ring[i+1][1] + ring[i][1]);
+            }
+            return sum > 0;
+        }
+        function forceClockwise(ring) { return isClockwise(ring) ? ring : ring.slice().reverse(); }
+        function forceCounterClockwise(ring) { return !isClockwise(ring) ? ring : ring.slice().reverse(); }
+
+        // 地図の基本構造が読み込まれたら、自動的に mapdata.json を取得する
+        map.on('load', () => {
+            fetch('./mapdata.json')
+                .then(response => response.json())
+                .then(geojsonData => {
+                    renderMap(geojsonData);
+                })
+                .catch(error => console.error('地図データの読み込みに失敗しました:', error));
+        });
+
+        function renderMap(geojsonData) {
+            // 世界全体を覆う青いシートを作成
+            const worldBounds = [[-180, 85], [-180, -85], [180, -85], [180, 85], [-180, 85]];
+            const maskCoordinates = [ forceCounterClockwise(worldBounds) ];
+
+            // 陸地・湖のマスクを構築
+            geojsonData.features.forEach(feature => {
+                if (!feature.geometry || !feature.geometry.coordinates) return;
+                const type = feature.geometry.type;
+                const coords = feature.geometry.coordinates;
+
+                if (type === 'Polygon') {
+                    if (coords.length > 0) maskCoordinates.push(forceClockwise(coords[0])); 
+                    for (let i = 1; i < coords.length; i++) maskCoordinates.push(forceCounterClockwise(coords[i]));
+                } else if (type === 'MultiPolygon') {
+                    coords.forEach(polygon => {
+                        if (polygon.length > 0) maskCoordinates.push(forceClockwise(polygon[0]));
+                        for (let i = 1; i < polygon.length; i++) maskCoordinates.push(forceCounterClockwise(polygon[i]));
+                    });
+                }
+            });
+
+            const maskSourceData = {
+                "type": "FeatureCollection",
+                "features": [{ "type": "Feature", "geometry": { "type": "Polygon", "coordinates": maskCoordinates } }]
+            };
+
+            // 最前面：海と湖の青いマスク
+            map.addSource('mask-source', { type: 'geojson', data: maskSourceData });
+            map.addLayer({
+                id: 'sea-lake-mask-layer',
+                type: 'fill',
+                source: 'mask-source',
+                paint: { 'fill-color': '#4682b4', 'fill-opacity': 1.0 }
+            });
+
+            // 郡の境界線とラベル
+            map.addSource('gun-data-source', { type: 'geojson', data: geojsonData });
+            map.addLayer({
+                id: 'gun-border-layer',
+                type: 'line',
+                source: 'gun-data-source',
+                paint: { 'line-color': '#ffffff', 'line-width': 1.0, 'line-dasharray': [3, 3], 'line-opacity': 0.7 }
+            });
+            map.addLayer({
+                id: 'gun-label-layer',
+                type: 'symbol',
+                source: 'gun-data-source',
+                layout: { 'text-field': ['get', 'GUN'], 'text-font': ['sans-serif'], 'text-size': 12, 'text-anchor': 'center' },
+                paint: { 'text-color': '#333333', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 }
+            });
+
+            // 地図をデータの範囲に自動でズームする
+            const bbox = turf.bbox(geojsonData);
+            map.fitBounds(bbox, { padding: 40, duration: 1000 });
+        }
+    </script>
+</body>
+</html>

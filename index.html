@@ -2,112 +2,109 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>戦国地図・高精度画像ベーカー</title>
+    <title>戦国時代 郡地図（決定版）</title>
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <style>
-        body { margin: 0; padding: 0; background-color: #222; font-family: sans-serif; }
+        body { margin: 0; padding: 0; background-color: #4682b4; } /* 根本の海の色 */
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
-        #panel {
-            position: absolute; top: 20px; left: 20px; z-index: 100;
-            background: white; padding: 20px; border-radius: 8px; width: 260px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-        }
-        button {
-            width: 100%; padding: 12px; background: #556b2f; color: white;
-            border: none; border-radius: 4px; font-weight: bold; cursor: pointer;
-        }
-        button:hover { background: #3e4f22; }
-        .info { font-size: 12px; color: #666; margin-top: 10px; line-height: 1.4; }
     </style>
 </head>
 <body>
+    <div id="map"></div>
 
-<div id="panel">
-    <h3 style="margin-top:0">戦国地図ベーカー</h3>
-    <p class="info">1. 地図を好きな範囲に合わせる<br>2. 下のボタンで画像として保存</p>
-    <button id="download-btn">🗺️ この範囲を画像で保存</button>
-    <div class="info" id="status"> mapdata.json 読み込み中...</div>
-</div>
-
-<div id="map"></div>
-
-<script>
-    const map = new maplibregl.Map({
-        container: 'map',
-        preserveDrawingBuffer: true, // 画像保存のために必須
-        style: {
-            version: 8,
-            sources: {
-                'gsi-hillshade': {
-                    type: 'raster',
-                    tiles: ['https://cyberjapandata.gsi.go.jp/xyz/hillshademap/{z}/{x}/{y}.png'],
-                    tileSize: 256, maxzoom: 16
+    <script>
+        // ★標高データから「海の影」を消去する自作翻訳機
+        maplibregl.addProtocol('gsidem', (params, callback) => {
+            const url = params.url.replace('gsidem://', '');
+            const image = new Image();
+            image.crossOrigin = 'Anonymous';
+            image.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 256; canvas.height = 256;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(image, 0, 0);
+                const imgData = ctx.getImageData(0, 0, 256, 256);
+                const data = imgData.data;
+                for (let i = 0; i < data.length; i += 4) {
+                    // 海（128, 0, 0）を検知したら、その場所の標高を「完全に平ら（0m）」に書き換える
+                    if (data[i] === 128 && data[i+1] === 0 && data[i+2] === 0) {
+                        data[i] = 1; data[i+1] = 134; data[i+2] = 160; // 0m相当のTerrain-RGB値
+                    }
                 }
+                ctx.putImageData(imgData, 0, 0);
+                canvas.toBlob(blob => blob.arrayBuffer().then(arr => callback(null, arr, null, null)));
+            };
+            image.src = url;
+            return { cancel: () => { image.src = ''; } };
+        });
+
+        const baseUrl = window.location.origin + window.location.pathname.replace(/[^\/]*$/, '');
+        const localTileUrl = 'gsidem://' + baseUrl + 'tiles/{z}/{x}/{y}.png';
+
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: {
+                version: 8,
+                sources: {
+                    'local-terrain': { type: 'raster-dem', tiles: [localTileUrl], tileSize: 256, maxzoom: 13 }
+                },
+                layers: [
+                    // 1. 最下層：全体を青く塗る（海になる）
+                    { id: 'background', type: 'background', paint: { 'background-color': '#4682b4' } }
+                ]
             },
-            layers: [
-                // 1. 海（蒼）
-                { id: 'sea-base', type: 'background', paint: { 'background-color': '#4682b4' } },
-                // 2. 陰影起伏図（これ自体は白黒）
-                { id: 'hillshade', type: 'raster', source: 'gsi-hillshade', paint: { 'raster-opacity': 1.0 } }
-            ]
-        },
-        center: [134.3, 34.0],
-        zoom: 9
-    });
+            center: [134.3, 34.0],
+            zoom: 9
+        });
 
-    map.on('load', () => {
-        fetch('./mapdata.json')
-            .then(res => res.json())
-            .then(data => {
-                map.addSource('land-data', { type: 'geojson', data: data });
+        map.on('load', () => {
+            fetch('./mapdata.json').then(res => res.json()).then(data => {
+                map.addSource('land-source', { type: 'geojson', data: data });
 
-                // ★魔法のレイヤー：合成モード「multiply(乗算)」
-                // これにより、陸地の緑の下に、起伏図の「影」だけが合成されます。
-                // 幾何学的なバグの原因だった「くり抜き」を一切使いません。
+                // 2. 中層：陸地を「緑」で塗る
+                // GeoJSONの仕様で、湖の部分は勝手に「穴」になるので、下の青が見えます。
                 map.addLayer({
                     id: 'land-fill',
                     type: 'fill',
-                    source: 'land-data',
+                    source: 'land-source',
+                    paint: { 'fill-color': '#556b2f', 'fill-opacity': 1.0 }
+                });
+
+                // 3. 最上層：山の「影」だけを重ねる
+                // 下の緑色に対して「影」として作用するため、緑の山脈が浮かび上がります。
+                map.addLayer({
+                    id: 'hillshade-layer',
+                    type: 'hillshade',
+                    source: 'local-terrain',
                     paint: {
-                        'fill-color': '#6b8e23',
-                        'fill-opacity': 0.7 // ここを調整して影の濃さを変えられます
+                        'hillshade-exaggeration': 2.0, // 険しさを強調
+                        'hillshade-shadow-color': '#000000',
+                        'hillshade-highlight-color': '#ffffff',
+                        'hillshade-accent-color': '#000000'
                     }
                 });
 
-                // 境界線
+                // 4. 装飾：境界線と郡名
                 map.addLayer({
                     id: 'borders',
                     type: 'line',
-                    source: 'land-data',
-                    paint: { 'line-color': '#fff', 'line-width': 0.8, 'line-opacity': 0.4 }
+                    source: 'land-source',
+                    paint: { 'line-color': '#fff', 'line-width': 0.5, 'line-opacity': 0.4 }
                 });
-
-                // 郡名ラベル
                 map.addLayer({
                     id: 'labels',
                     type: 'symbol',
-                    source: 'land-data',
+                    source: 'land-source',
                     layout: { 'text-field': ['get', 'GUN'], 'text-size': 12 },
-                    paint: { 'text-color': '#222', 'text-halo-color': '#fff', 'text-halo-width': 1.5 }
+                    paint: { 'text-color': '#fff', 'text-halo-color': '#222', 'text-halo-width': 1.5 }
                 });
 
-                document.getElementById('status').innerText = "準備完了";
                 const bbox = turf.bbox(data);
                 map.fitBounds(bbox, { padding: 50 });
             });
-    });
-
-    // 画像保存ボタンの処理
-    document.getElementById('download-btn').onclick = () => {
-        const canvas = map.getCanvas();
-        const link = document.createElement('a');
-        link.download = 'sengoku_map_baked.png';
-        link.href = canvas.toDataURL('image/png');
-        link.click();
-        alert("地図画像を保存しました！\nこの画像ファイルをゲームで使用してください。");
-    };
-</script>
+        });
+    </script>
 </body>
 </html>

@@ -3,118 +3,130 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>戦国時代 郡地図</title>
+    <title>戦国時代 郡地図(デバッグ版)</title>
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <script src="https://unpkg.com/maplibre-gl-gsi-terrain@1.0.0/dist/maplibre-gl-gsi-terrain.js"></script>
     <style>
-        body { margin: 0; padding: 0; background-color: #4682b4; } /* 海の青色 */
+        body { margin: 0; padding: 0; background-color: #4682b4; }
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
-        #loading {
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            background: rgba(0,0,0,0.7); color: white; padding: 20px; border-radius: 10px;
-            font-family: sans-serif; z-index: 100; pointer-events: none;
+        #status-panel {
+            position: absolute; top: 10px; left: 10px; z-index: 100;
+            background: white; padding: 15px; border-radius: 5px; font-size: 13px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3); max-width: 280px;
         }
+        .err { color: red; font-weight: bold; }
+        .ok { color: green; }
     </style>
 </head>
 <body>
-    <div id="loading">地図データを展開中...</div>
+    <div id="status-panel">
+        <b>システム状況:</b><br>
+        <div id="step1">1. 地図エンジン起動中...</div>
+        <div id="step2">2. JSONファイルをDL中...</div>
+        <div id="step3">3. 地図を描画中...</div>
+        <hr>
+        <div id="log"></div>
+    </div>
     <div id="map"></div>
 
     <script>
-        // 地形データを解読する設定
-        maplibregl.addProtocol('gsidem', maplibreglGsiTerrain.rasterDemProtocol);
-        
-        // 自分のサイトのURLからタイルの場所を特定
-        const baseUrl = window.location.origin + window.location.pathname.replace(/[^\/]*$/, '');
-        const localTileUrl = 'gsidem://' + baseUrl + 'tiles/{z}/{x}/{y}.png';
+        const step1 = document.getElementById('step1');
+        const step2 = document.getElementById('step2');
+        const step3 = document.getElementById('step3');
+        const log = document.getElementById('log');
 
-        const map = new maplibregl.Map({
-            container: 'map',
-            style: {
-                version: 8,
-                sources: {
-                    'local-terrain': { type: 'raster-dem', tiles: [localTileUrl], tileSize: 256, maxzoom: 13 }
-                },
-                layers: [
-                    // 【1層目：最背面】 背景（海の色）
-                    { id: 'background', type: 'background', paint: { 'background-color': '#4682b4' } }
-                ]
-            },
-            center: [134.3, 34.0],
-            zoom: 8
-        });
+        function setLog(msg, isErr = false) {
+            log.innerHTML = `<span class="${isErr ? 'err' : ''}">${msg}</span>`;
+            console.log(msg);
+        }
 
-        map.on('load', () => {
-            // 【2層目：中間】 山の起伏（影）を海の上に表示
-            map.addLayer({
-                id: 'hillshade-layer',
-                type: 'hillshade',
-                source: 'local-terrain',
-                paint: {
-                    'hillshade-exaggeration': 1.5,
-                    'hillshade-shadow-color': '#222222',
-                    'hillshade-highlight-color': '#ffffff'
-                }
-            });
-
-            // 【3層目：最前面】 陸地データを読み込んで重ねる
-            fetch('./mapdata.json')
-                .then(response => response.json())
-                .then(geojsonData => {
-                    renderMap(geojsonData);
-                    document.getElementById('loading').style.display = 'none';
-                })
-                .catch(error => {
-                    console.error('読み込み失敗:', error);
-                    alert('地図データ(mapdata.json)が見つかりません。ファイル名を確認してください。');
-                });
-        });
-
-        function renderMap(geojsonData) {
-            // 陸地の塗りつぶし（湖はデータ上で穴になっているため、自動的に下の海の色が見える）
-            map.addSource('gun-data-source', { type: 'geojson', data: geojsonData });
+        try {
+            maplibregl.addProtocol('gsidem', maplibreglGsiTerrain.rasterDemProtocol);
             
-            map.addLayer({
-                id: 'land-fill-layer',
-                type: 'fill',
-                source: 'gun-data-source',
-                paint: {
-                    'fill-color': '#6b8e23', // 陸地の緑
-                    'fill-opacity': 0.7      // 下の山の影が透けて見えるように調整
-                }
-            });
+            const baseUrl = window.location.origin + window.location.pathname.replace(/[^\/]*$/, '');
+            const localTileUrl = 'gsidem://' + baseUrl + 'tiles/{z}/{x}/{y}.png';
 
-            // 境界線
-            map.addLayer({
-                id: 'gun-border-layer',
-                type: 'line',
-                source: 'gun-data-source',
-                paint: { 'line-color': '#ffffff', 'line-width': 1.0, 'line-opacity': 0.5 }
-            });
-
-            // ラベル
-            map.addLayer({
-                id: 'gun-label-layer',
-                type: 'symbol',
-                source: 'gun-data-source',
-                layout: {
-                    'text-field': ['get', 'GUN'],
-                    'text-font': ['sans-serif'],
-                    'text-size': 12,
-                    'text-anchor': 'center'
+            const map = new maplibregl.Map({
+                container: 'map',
+                style: {
+                    version: 8,
+                    sources: {
+                        'local-terrain': { type: 'raster-dem', tiles: [localTileUrl], tileSize: 256, maxzoom: 13 }
+                    },
+                    layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#4682b4' } }]
                 },
-                paint: {
-                    'text-color': '#333333',
-                    'text-halo-color': '#ffffff',
-                    'text-halo-width': 1.5
-                }
+                center: [134.3, 34.0],
+                zoom: 8
             });
 
-            // データの範囲に自動ジャンプ
-            const bbox = turf.bbox(geojsonData);
-            map.fitBounds(bbox, { padding: 40, duration: 1000 });
+            map.on('load', () => {
+                step1.innerHTML = "1. 地図エンジン起動 <span class='ok'>OK</span>";
+                
+                // 地形レイヤー追加
+                map.addLayer({
+                    id: 'hillshade-layer',
+                    type: 'hillshade',
+                    source: 'local-terrain',
+                    paint: { 'hillshade-exaggeration': 1.5 }
+                });
+
+                setLog("mapdata.json を取得しています...");
+                
+                fetch('./mapdata.json')
+                    .then(res => {
+                        if (!res.ok) throw new Error(`ファイルが見つかりません (${res.status})`);
+                        return res.json();
+                    })
+                    .then(data => {
+                        step2.innerHTML = "2. JSONダウンロード <span class='ok'>OK</span>";
+                        setLog("地図を描画しています...");
+                        renderMap(data);
+                    })
+                    .catch(err => {
+                        step2.innerHTML = "2. JSONダウンロード <span class='err'>失敗</span>";
+                        setLog(err.message, true);
+                    });
+            });
+
+            function renderMap(geojsonData) {
+                map.addSource('gun-data-source', { type: 'geojson', data: geojsonData });
+                
+                map.addLayer({
+                    id: 'land-fill-layer',
+                    type: 'fill',
+                    source: 'gun-data-source',
+                    paint: { 'fill-color': '#6b8e23', 'fill-opacity': 0.7 }
+                });
+
+                map.addLayer({
+                    id: 'gun-border-layer',
+                    type: 'line',
+                    source: 'gun-data-source',
+                    paint: { 'line-color': '#ffffff', 'line-width': 1.0, 'line-opacity': 0.5 }
+                });
+
+                map.addLayer({
+                    id: 'gun-label-layer',
+                    type: 'symbol',
+                    source: 'gun-data-source',
+                    layout: {
+                        'text-field': ['get', 'GUN'],
+                        'text-size': 12,
+                        'text-anchor': 'center'
+                    },
+                    paint: { 'text-color': '#333333', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 }
+                });
+
+                const bbox = turf.bbox(geojsonData);
+                map.fitBounds(bbox, { padding: 40, duration: 1000 });
+                
+                step3.innerHTML = "3. 地図描画 <span class='ok'>完了！</span>";
+                setLog("すべて正常に読み込まれました。");
+            }
+        } catch (e) {
+            setLog("重大なエラー: " + e.message, true);
         }
     </script>
 </body>

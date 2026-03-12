@@ -2,12 +2,13 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>戦国時代 郡地図（安定版）</title>
+    <title>戦国時代 郡地図（起伏・海青版）</title>
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <style>
-        body { margin: 0; padding: 0; background-color: #f0f0f0; }
+        /* 背景を「海の青」に固定 */
+        body { margin: 0; padding: 0; background-color: #3b5a82; } 
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
     </style>
 </head>
@@ -15,28 +16,51 @@
     <div id="map"></div>
 
     <script>
+        // ★重要：ダウンロード済みのタイルから「海」を消し去る特殊翻訳機
+        maplibregl.addProtocol('gsitrip', (params, callback) => {
+            const url = params.url.replace('gsitrip://', '');
+            const image = new Image();
+            image.crossOrigin = 'Anonymous';
+            image.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 256; canvas.height = 256;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(image, 0, 0);
+                const imgData = ctx.getImageData(0, 0, 256, 256);
+                const d = imgData.data;
+                for (let i = 0; i < d.length; i += 4) {
+                    // 国土地理院データの海（128, 0, 0）を「完全に透明」にする
+                    if (d[i] === 128 && d[i+1] === 0 && d[i+2] === 0) {
+                        d[i+3] = 0; 
+                    } else {
+                        // 陸地部分はMapLibreが理解できるTerrain-RGB形式に変換
+                        let u = d[i] * 65536 + d[i+1] * 256 + d[i+2];
+                        let h = (u < 8388608) ? u : u - 16777216;
+                        let v = Math.round((h * 0.01 + 10000) * 10);
+                        d[i] = (v >> 16) & 0xff; d[i+1] = (v >> 8) & 0xff; d[i+2] = v & 0xff; d[i+3] = 255;
+                    }
+                }
+                ctx.putImageData(imgData, 0, 0);
+                canvas.toBlob(blob => blob.arrayBuffer().then(arr => callback(null, arr, null, null)));
+            };
+            image.src = url;
+            return { cancel: () => { image.src = ''; } };
+        });
+
+        // 自分のGitHub上のタイルフォルダを参照
+        const baseUrl = window.location.href.split('index.html')[0].replace(/\/$/, '');
+        const tilesUrl = 'gsitrip://' + baseUrl + '/tiles/{z}/{x}/{y}.png';
+
         const map = new maplibregl.Map({
             container: 'map',
             style: {
                 version: 8,
                 sources: {
-                    // ★土台：国土地理院の陰影起伏図を直接読み込む
-                    'gsi-hillshade': {
-                        type: 'raster',
-                        tiles: ['https://cyberjapandata.gsi.go.jp/xyz/hillshademap/{z}/{x}/{y}.png'],
-                        tileSize: 256,
-                        maxzoom: 16,
-                        attribution: '国土地理院'
-                    }
+                    'terrain-src': { type: 'raster-dem', tiles: [tilesUrl], tileSize: 256, maxzoom: 13 }
                 },
                 layers: [
-                    // 1層目：山の起伏（陰影図）を全面に表示
-                    {
-                        id: 'hillshade-layer',
-                        type: 'raster',
-                        source: 'gsi-hillshade',
-                        paint: { 'raster-opacity': 1.0 }
-                    }
+                    // 1. 【最下層】海の青色
+                    { id: 'background', type: 'background', paint: { 'background-color': '#3b5a82' } }
                 ]
             },
             center: [134.3, 34.0],
@@ -44,45 +68,48 @@
         });
 
         map.on('load', () => {
-            // 2層目：郡の境界線とラベルだけを乗せる
-            fetch('./mapdata.json')
-                .then(res => res.json())
-                .then(data => {
-                    map.addSource('gun-data', { type: 'geojson', data: data });
+            // 2. 【中層】山の起伏（影）だけを置く
+            // 海を透明にしたので、陸地の形に影だけが浮かび上がります。
+            map.addLayer({
+                id: 'hills',
+                type: 'hillshade',
+                source: 'terrain-src',
+                paint: { 
+                    'hillshade-exaggeration': 2.0, // 険しさを強調
+                    'hillshade-shadow-color': '#1a1a1a',
+                    'hillshade-highlight-color': '#ffffff',
+                    'hillshade-accent-color': '#3b5a82' // 影の色を海の色と馴染ませる
+                }
+            });
 
-                    // 郡の境界線（黒か濃い茶色にすると古地図っぽくなります）
-                    map.addLayer({
-                        id: 'borders',
-                        type: 'line',
-                        source: 'gun-data',
-                        paint: {
-                            'line-color': '#4a3a2a', // 濃い茶色
-                            'line-width': 1.2,
-                            'line-opacity': 0.7
-                        }
-                    });
+            // 3. 【上層】郡の境界線とラベル
+            fetch('./mapdata.json').then(res => res.json()).then(data => {
+                map.addSource('gun-src', { type: 'geojson', data: data });
 
-                    // 郡名（筆文字風のフォントがなくても読みやすく配置）
-                    map.addLayer({
-                        id: 'labels',
-                        type: 'symbol',
-                        source: 'gun-data',
-                        layout: {
-                            'text-field': ['get', 'GUN'],
-                            'text-size': 13,
-                            'text-font': ['Open Sans Bold', 'Arial Unicode MS Regular']
-                        },
-                        paint: {
-                            'text-color': '#000000',
-                            'text-halo-color': '#ffffff',
-                            'text-halo-width': 2
-                        }
-                    });
-
-                    // 地図の範囲を合わせる
-                    const bbox = turf.bbox(data);
-                    map.fitBounds(bbox, { padding: 50 });
+                // 郡の境界線
+                map.addLayer({
+                    id: 'borders', type: 'line', source: 'gun-src',
+                    paint: { 'line-color': '#ffffff', 'line-width': 1.0, 'line-opacity': 0.4 }
                 });
+
+                // 郡の名前
+                map.addLayer({
+                    id: 'labels', type: 'symbol', source: 'gun-src',
+                    layout: { 
+                        'text-field': ['get', 'GUN'], 
+                        'text-size': 12,
+                        'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular']
+                    },
+                    paint: { 
+                        'text-color': '#ffffff', 
+                        'text-halo-color': '#000000', 
+                        'text-halo-width': 1 
+                    }
+                });
+
+                const bbox = turf.bbox(data);
+                map.fitBounds(bbox, { padding: 50 });
+            });
         });
     </script>
 </body>

@@ -2,12 +2,12 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>戦国時代 郡地図（決定版）</title>
+    <title>戦国時代 郡地図（安定版）</title>
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <style>
-        body { margin: 0; padding: 0; background-color: #4682b4; } /* 蒼（海の色） */
+        body { margin: 0; padding: 0; background-color: #f0f0f0; }
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
     </style>
 </head>
@@ -15,49 +15,28 @@
     <div id="map"></div>
 
     <script>
-        // ★重要：外部プラグインに依存せず、自前で地形の影を作る「透明化翻訳機」
-        maplibregl.addProtocol('gsitrip', (params, callback) => {
-            const url = params.url.replace('gsitrip://', '');
-            const image = new Image();
-            image.crossOrigin = 'Anonymous';
-            image.onload = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = 256; canvas.height = 256;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(image, 0, 0);
-                const imgData = ctx.getImageData(0, 0, 256, 256);
-                const d = imgData.data;
-                for (let i = 0; i < d.length; i += 4) {
-                    // 海（128,0,0）の部分を「完全な透明」にする。これで海に影が出なくなる。
-                    if (d[i] === 128 && d[i+1] === 0 && d[i+2] === 0) { d[i+3] = 0; }
-                    else {
-                        // 地理院標高RGBをMapLibreが理解できるTerrain-RGB形式にリアルタイム変換
-                        let u = d[i] * 65536 + d[i+1] * 256 + d[i+2];
-                        let h = (u < 8388608) ? u : u - 16777216;
-                        let v = Math.round((h * 0.01 + 10000) * 10);
-                        d[i] = (v >> 16) & 0xff; d[i+1] = (v >> 8) & 0xff; d[i+2] = v & 0xff; d[i+3] = 255;
-                    }
-                }
-                ctx.putImageData(imgData, 0, 0);
-                canvas.toBlob(blob => blob.arrayBuffer().then(arr => callback(null, arr, null, null)));
-            };
-            image.src = url;
-            return { cancel: () => { image.src = ''; } };
-        });
-
-        const baseUrl = window.location.href.split('index.html')[0].replace(/\/$/, '');
-        const tilesUrl = 'gsitrip://' + baseUrl + '/tiles/{z}/{x}/{y}.png';
-
         const map = new maplibregl.Map({
             container: 'map',
             style: {
                 version: 8,
                 sources: {
-                    'terrain-src': { type: 'raster-dem', tiles: [tilesUrl], tileSize: 256, maxzoom: 13 }
+                    // ★土台：国土地理院の陰影起伏図を直接読み込む
+                    'gsi-hillshade': {
+                        type: 'raster',
+                        tiles: ['https://cyberjapandata.gsi.go.jp/xyz/hillshademap/{z}/{x}/{y}.png'],
+                        tileSize: 256,
+                        maxzoom: 16,
+                        attribution: '国土地理院'
+                    }
                 },
                 layers: [
-                    // 1. 【最下層】海の色（蒼）
-                    { id: 'sea-bg', type: 'background', paint: { 'background-color': '#4682b4' } }
+                    // 1層目：山の起伏（陰影図）を全面に表示
+                    {
+                        id: 'hillshade-layer',
+                        type: 'raster',
+                        source: 'gsi-hillshade',
+                        paint: { 'raster-opacity': 1.0 }
+                    }
                 ]
             },
             center: [134.3, 34.0],
@@ -65,45 +44,45 @@
         });
 
         map.on('load', () => {
-            fetch('./mapdata.json').then(res => res.json()).then(data => {
-                map.addSource('land-src', { type: 'geojson', data: data });
+            // 2層目：郡の境界線とラベルだけを乗せる
+            fetch('./mapdata.json')
+                .then(res => res.json())
+                .then(data => {
+                    map.addSource('gun-data', { type: 'geojson', data: data });
 
-                // 2. 【中層】陸地を緑で塗る
-                // GeoJSONの「湖」の部分は自動的に穴が空くので、下の蒼が見えます。
-                map.addLayer({
-                    id: 'land-fill',
-                    type: 'fill',
-                    source: 'land-src',
-                    paint: { 'fill-color': '#556b2f', 'fill-opacity': 1.0 }
-                });
+                    // 郡の境界線（黒か濃い茶色にすると古地図っぽくなります）
+                    map.addLayer({
+                        id: 'borders',
+                        type: 'line',
+                        source: 'gun-data',
+                        paint: {
+                            'line-color': '#4a3a2a', // 濃い茶色
+                            'line-width': 1.2,
+                            'line-opacity': 0.7
+                        }
+                    });
 
-                // 3. 【上層】山の影だけを乗せる
-                // 自作翻訳機で「海を透明」にしたため、陸地だけに影が落ちます。
-                map.addLayer({
-                    id: 'hills',
-                    type: 'hillshade',
-                    source: 'terrain-src',
-                    paint: { 
-                        'hillshade-exaggeration': 1.8,
-                        'hillshade-shadow-color': '#000000',
-                        'hillshade-highlight-color': '#ffffff'
-                    }
-                });
+                    // 郡名（筆文字風のフォントがなくても読みやすく配置）
+                    map.addLayer({
+                        id: 'labels',
+                        type: 'symbol',
+                        source: 'gun-data',
+                        layout: {
+                            'text-field': ['get', 'GUN'],
+                            'text-size': 13,
+                            'text-font': ['Open Sans Bold', 'Arial Unicode MS Regular']
+                        },
+                        paint: {
+                            'text-color': '#000000',
+                            'text-halo-color': '#ffffff',
+                            'text-halo-width': 2
+                        }
+                    });
 
-                // 4. 【装飾】境界線と名前
-                map.addLayer({
-                    id: 'borders', type: 'line', source: 'land-src',
-                    paint: { 'line-color': '#fff', 'line-width': 0.5, 'line-opacity': 0.4 }
+                    // 地図の範囲を合わせる
+                    const bbox = turf.bbox(data);
+                    map.fitBounds(bbox, { padding: 50 });
                 });
-                map.addLayer({
-                    id: 'labels', type: 'symbol', source: 'land-src',
-                    layout: { 'text-field': ['get', 'GUN'], 'text-size': 12 },
-                    paint: { 'text-color': '#fff', 'text-halo-color': '#222', 'text-halo-width': 1.5 }
-                });
-
-                const bbox = turf.bbox(data);
-                map.fitBounds(bbox, { padding: 50 });
-            });
         });
     </script>
 </body>

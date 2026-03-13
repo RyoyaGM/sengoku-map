@@ -2,21 +2,36 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>戦国時代 郡地図（起伏・海青版）</title>
+    <title>戦国時代 郡地図（海スライダー版）</title>
     <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
     <style>
-        /* 背景を「海の青」に固定 */
-        body { margin: 0; padding: 0; background-color: #3b5a82; } 
+        /* 根底の背景色：海を透明にした時に現れる「和紙のような古地図色」 */
+        body { margin: 0; padding: 0; background-color: #e0d8c8; font-family: sans-serif; } 
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+        
+        /* スライダーのパネルデザイン */
+        #ui-panel {
+            position: absolute; top: 15px; left: 15px; z-index: 100;
+            background: rgba(255, 255, 255, 0.85); padding: 15px;
+            border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            border: 1px solid #333; width: 200px;
+        }
+        #ui-panel label { font-size: 14px; font-weight: bold; color: #333; }
+        input[type=range] { width: 100%; margin-top: 10px; cursor: pointer; }
     </style>
 </head>
 <body>
+    <div id="ui-panel">
+        <label for="sea-slider">海の蒼さ: <span id="sea-value">100%</span></label>
+        <input type="range" id="sea-slider" min="0" max="100" value="100">
+    </div>
+
     <div id="map"></div>
 
     <script>
-        // ★重要：ダウンロード済みのタイルから「海」を消し去る特殊翻訳機
+        // ダウンロード済みのタイルから「海」を透明にする自作翻訳機
         maplibregl.addProtocol('gsitrip', (params, callback) => {
             const url = params.url.replace('gsitrip://', '');
             const image = new Image();
@@ -29,11 +44,9 @@
                 const imgData = ctx.getImageData(0, 0, 256, 256);
                 const d = imgData.data;
                 for (let i = 0; i < d.length; i += 4) {
-                    // 国土地理院データの海（128, 0, 0）を「完全に透明」にする
                     if (d[i] === 128 && d[i+1] === 0 && d[i+2] === 0) {
-                        d[i+3] = 0; 
+                        d[i+3] = 0; // 海の部分は透明
                     } else {
-                        // 陸地部分はMapLibreが理解できるTerrain-RGB形式に変換
                         let u = d[i] * 65536 + d[i+1] * 256 + d[i+2];
                         let h = (u < 8388608) ? u : u - 16777216;
                         let v = Math.round((h * 0.01 + 10000) * 10);
@@ -47,7 +60,6 @@
             return { cancel: () => { image.src = ''; } };
         });
 
-        // 自分のGitHub上のタイルフォルダを参照
         const baseUrl = window.location.href.split('index.html')[0].replace(/\/$/, '');
         const tilesUrl = 'gsitrip://' + baseUrl + '/tiles/{z}/{x}/{y}.png';
 
@@ -59,8 +71,15 @@
                     'terrain-src': { type: 'raster-dem', tiles: [tilesUrl], tileSize: 256, maxzoom: 13 }
                 },
                 layers: [
-                    // 1. 【最下層】海の青色
-                    { id: 'background', type: 'background', paint: { 'background-color': '#3b5a82' } }
+                    // 1. 【最下層】海の青色レイヤー（スライダーでここの透明度を変えます）
+                    { 
+                        id: 'sea-background', 
+                        type: 'background', 
+                        paint: { 
+                            'background-color': '#3b5a82', 
+                            'background-opacity': 1.0 
+                        } 
+                    }
                 ]
             },
             center: [134.3, 34.0],
@@ -68,48 +87,56 @@
         });
 
         map.on('load', () => {
-            // 2. 【中層】山の起伏（影）だけを置く
-            // 海を透明にしたので、陸地の形に影だけが浮かび上がります。
+            // 2. 山の起伏（影）
             map.addLayer({
                 id: 'hills',
                 type: 'hillshade',
                 source: 'terrain-src',
                 paint: { 
-                    'hillshade-exaggeration': 2.0, // 険しさを強調
+                    'hillshade-exaggeration': 2.0,
                     'hillshade-shadow-color': '#1a1a1a',
-                    'hillshade-highlight-color': '#ffffff',
-                    'hillshade-accent-color': '#3b5a82' // 影の色を海の色と馴染ませる
+                    'hillshade-highlight-color': '#ffffff'
                 }
             });
 
-            // 3. 【上層】郡の境界線とラベル
+            // 3. 郡の境界線とラベル
             fetch('./mapdata.json').then(res => res.json()).then(data => {
                 map.addSource('gun-src', { type: 'geojson', data: data });
 
-                // 郡の境界線
                 map.addLayer({
                     id: 'borders', type: 'line', source: 'gun-src',
-                    paint: { 'line-color': '#ffffff', 'line-width': 1.0, 'line-opacity': 0.4 }
+                    paint: { 'line-color': '#ffffff', 'line-width': 1.0, 'line-opacity': 0.5 }
                 });
 
-                // 郡の名前
                 map.addLayer({
                     id: 'labels', type: 'symbol', source: 'gun-src',
-                    layout: { 
-                        'text-field': ['get', 'GUN'], 
-                        'text-size': 12,
-                        'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular']
-                    },
-                    paint: { 
-                        'text-color': '#ffffff', 
-                        'text-halo-color': '#000000', 
-                        'text-halo-width': 1 
-                    }
+                    layout: { 'text-field': ['get', 'GUN'], 'text-size': 13 },
+                    paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.5 }
                 });
 
                 const bbox = turf.bbox(data);
                 map.fitBounds(bbox, { padding: 50 });
             });
+        });
+
+        // ★スライダーを動かした時の処理
+        document.getElementById('sea-slider').addEventListener('input', function(e) {
+            const val = e.target.value;
+            document.getElementById('sea-value').innerText = val + '%';
+            
+            // 0%〜100%を、0.0〜1.0の不透明度に変換して地図に適用
+            map.setPaintProperty('sea-background', 'background-opacity', val / 100);
+            
+            // 海が薄くなると白い文字が見えにくくなるため、文字色も自動で黒っぽく反転させるギミック
+            const textColor = val < 50 ? '#000000' : '#ffffff';
+            const haloColor = val < 50 ? '#ffffff' : '#000000';
+            const lineColor = val < 50 ? '#333333' : '#ffffff';
+            
+            if (map.getLayer('labels')) {
+                map.setPaintProperty('labels', 'text-color', textColor);
+                map.setPaintProperty('labels', 'text-halo-color', haloColor);
+                map.setPaintProperty('borders', 'line-color', lineColor);
+            }
         });
     </script>
 </body>
